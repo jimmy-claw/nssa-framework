@@ -1,68 +1,183 @@
 # nssa-framework
 
-Developer experience framework for building NSSA/LEZ programs — inspired by [Anchor](https://www.anchor-lang.com/) for Solana.
+Developer framework for building NSSA/LEZ programs — inspired by [Anchor](https://www.anchor-lang.com/) for Solana.
 
-## Crates
-
-| Crate | Description |
-|-------|-------------|
-| `nssa-framework-core` | IDL types, error types, `NssaOutput`, validation |
-| `nssa-framework-macros` | Proc macros: `#[nssa_program]`, `#[instruction]` |
-| `nssa-framework` | Umbrella crate with prelude re-exports |
-| `nssa-framework-cli` | Generic IDL-driven CLI with TX submission |
+Write your program logic with proc macros. Get IDL generation, a full CLI with TX submission, and project scaffolding for free.
 
 ## Quick Start
 
-### Define a program
+### Scaffold a new project
+
+```bash
+cargo install --path nssa-framework-cli
+nssa-cli init my-program
+cd my-program
+```
+
+This generates a complete project:
+
+```
+my-program/
+├── Cargo.toml                 # Workspace
+├── Makefile                   # build, idl, cli, deploy, inspect, setup
+├── README.md
+├── my_program_core/           # Shared types (guest + host)
+│   └── src/lib.rs
+├── methods/
+│   └── guest/                 # RISC Zero guest (runs on-chain)
+│       └── src/bin/my_program.rs
+└── examples/
+    └── src/bin/
+        ├── generate_idl.rs    # One-liner IDL generator
+        └── my_program_cli.rs  # Three-line CLI wrapper
+```
+
+### Build → Deploy → Transact
+
+```bash
+make build        # Build the guest binary (risc0)
+make idl          # Generate IDL from #[nssa_program] annotations
+make deploy       # Deploy to sequencer
+make cli ARGS="--help"   # See auto-generated commands
+make cli ARGS="-p <binary> initialize --owner-account <BASE58>"
+```
+
+## Writing Programs
 
 ```rust
+#![no_main]
+
+use nssa_core::account::AccountWithMetadata;
+use nssa_core::program::AccountPostState;
 use nssa_framework::prelude::*;
 
+risc0_zkvm::guest::entry!(main);
+
 #[nssa_program]
-pub mod my_program {
+mod my_program {
+    #[allow(unused_imports)]
     use super::*;
 
     #[instruction]
-    pub fn initialize(ctx: Context, name: String, amount: u64) -> NssaResult {
-        // Your program logic here
-        Ok(NssaOutput::default())
+    pub fn initialize(
+        #[account(init, pda = literal("state"))]
+        state: AccountWithMetadata,
+        #[account(signer)]
+        owner: AccountWithMetadata,
+    ) -> NssaResult {
+        // Your logic here
+        Ok(NssaOutput::states_only(vec![
+            AccountPostState::new_claimed(state.account.clone()),
+            AccountPostState::new(owner.account.clone()),
+        ]))
+    }
+
+    #[instruction]
+    pub fn transfer(
+        #[account(mut, pda = literal("state"))]
+        state: AccountWithMetadata,
+        recipient: AccountWithMetadata,
+        #[account(signer)]
+        sender: AccountWithMetadata,
+        amount: u128,
+    ) -> NssaResult {
+        // Your logic here
+        Ok(NssaOutput::states_only(vec![
+            AccountPostState::new(state.account.clone()),
+            AccountPostState::new(recipient.account.clone()),
+            AccountPostState::new(sender.account.clone()),
+        ]))
     }
 }
 ```
 
-### Generate IDL
+### Account Attributes
 
-```bash
-cargo run --bin generate_idl > my-program-idl.json
+| Attribute | Description |
+|-----------|-------------|
+| `#[account(mut)]` | Account is writable |
+| `#[account(init)]` | Account is being created (use `new_claimed`) |
+| `#[account(signer)]` | Account must sign the transaction |
+| `#[account(pda = literal("seed"))]` | PDA derived from a constant string |
+| `#[account(pda = account("other"))]` | PDA derived from another account's ID |
+
+### The CLI Wrapper
+
+Every program gets a full CLI for free. The wrapper is just:
+
+```rust
+#[tokio::main]
+async fn main() {
+    nssa_framework_cli::run().await;
+}
 ```
 
-### Use the CLI
+This provides:
+- Auto-generated subcommands from IDL instructions
+- Type-aware argument parsing (u128, [u8; N], base58 accounts, ProgramId, etc.)
+- Automatic PDA computation from IDL seeds
+- risc0-compatible serialization
+- Transaction building and submission with wallet integration
+- `--dry-run` mode for testing
+- `inspect` subcommand to extract ProgramId from binaries
+
+### IDL Generation
+
+The IDL generator is also a one-liner:
+
+```rust
+nssa_framework::generate_idl!("../methods/guest/src/bin/my_program.rs");
+```
+
+It reads the `#[nssa_program]` annotations at compile time and generates a complete JSON IDL describing instructions, arguments, accounts, and PDA seeds.
+
+## CLI Usage
 
 ```bash
-# Inspect a compiled program binary
-nssa-cli --idl my-program-idl.json inspect artifacts/my-program.bin
+# Scaffold a new project (no --idl needed)
+nssa-cli init my-program
+
+# Inspect program binaries (no --idl needed)
+nssa-cli inspect program.bin
+
+# Show available commands
+nssa-cli --idl program-idl.json --help
 
 # Dry run an instruction
-nssa-cli --idl my-program-idl.json --program artifacts/my-program.bin --dry-run \
-  initialize --name "hello" --amount 1000
+nssa-cli --idl program-idl.json --dry-run -p program.bin \
+  create-vault --token-name "MYTKN" --initial-supply 1000000
 
 # Submit a transaction
-nssa-cli --idl my-program-idl.json --program artifacts/my-program.bin \
-  initialize --name "hello" --amount 1000
+nssa-cli --idl program-idl.json -p program.bin \
+  create-vault --token-name "MYTKN" --initial-supply 1000000
+
+# Auto-fill program IDs from binaries
+nssa-cli --idl program-idl.json -p treasury.bin --bin-token token.bin \
+  create-vault --token-name "MYTKN" --initial-supply 1000000
 
 # Get help for a specific instruction
-nssa-cli --idl my-program-idl.json initialize --help
+nssa-cli --idl program-idl.json create-vault --help
 ```
 
-### Type formats
+### Type Formats
 
 | IDL Type | CLI Format |
 |----------|------------|
 | `u8`, `u32`, `u64`, `u128` | Decimal number |
 | `[u8; N]` | Hex string (2×N chars) or UTF-8 string (≤N chars, right-padded) |
 | `[u32; 8]` / `program_id` | Comma-separated u32s: `"0,0,0,0,0,0,0,0"` |
-| `Vec<[u8; 32]>` | Comma-separated hex or base58: `"aabb...00,ccdd...00"` |
+| `Vec<[u8; 32]>` | Comma-separated hex or base58: `"addr1,addr2"` |
 | `Option<T>` | Value or `"none"` |
+| Account IDs | Base58 or 64-char hex |
+
+## Crates
+
+| Crate | Description |
+|-------|-------------|
+| `nssa-framework` | Umbrella crate — re-exports macros + core with a prelude |
+| `nssa-framework-core` | IDL types, error types, `NssaOutput` |
+| `nssa-framework-macros` | Proc macros: `#[nssa_program]`, `#[instruction]`, `generate_idl!` |
+| `nssa-framework-cli` | Generic IDL-driven CLI with TX submission + project scaffolding |
 
 ## License
 
