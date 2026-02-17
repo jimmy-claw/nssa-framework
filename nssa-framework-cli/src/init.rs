@@ -305,7 +305,7 @@ mod {snake_name} {{
         owner: AccountWithMetadata,
     ) -> NssaResult {{
         // TODO: implement initialization logic
-        Ok(NssaOutput::new(vec![
+        Ok(NssaOutput::states_only(vec![
             AccountPostState::new_claimed(state.account.clone()),
             AccountPostState::new(owner.account.clone()),
         ]))
@@ -321,7 +321,7 @@ mod {snake_name} {{
         _amount: u64,
     ) -> NssaResult {{
         // TODO: implement your logic
-        Ok(NssaOutput::new(vec![
+        Ok(NssaOutput::states_only(vec![
             AccountPostState::new(state.account.clone()),
             AccountPostState::new(owner.account.clone()),
         ]))
