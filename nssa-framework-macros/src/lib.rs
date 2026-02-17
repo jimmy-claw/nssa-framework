@@ -621,7 +621,7 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenS
                 .accounts
                 .iter()
                 .map(|acc| {
-                    let acc_name = acc.name.to_string();
+                    let acc_name = acc.name.to_string().trim_start_matches('_').to_string();
                     let writable = acc.constraints.mutable;
                     let signer = acc.constraints.signer;
                     let init = acc.constraints.init;
@@ -670,7 +670,7 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenS
                 .args
                 .iter()
                 .map(|arg| {
-                    let arg_name = arg.name.to_string();
+                    let arg_name = arg.name.to_string().trim_start_matches('_').to_string();
                     let type_str = rust_type_to_idl_string(&arg.ty);
                     quote! {
                         nssa_framework_core::idl::IdlArg {

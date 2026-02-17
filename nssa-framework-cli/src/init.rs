@@ -318,7 +318,7 @@ mod {snake_name} {{
         state: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
-        _amount: u64,
+        amount: u64,
     ) -> NssaResult {{
         // TODO: implement your logic
         Ok(NssaOutput::states_only(vec![
