@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "nssa-framework",
+    "nssa-framework-core",
+    "nssa-framework-macros",
+    "nssa-framework-cli",
+]
+resolver = "2"
