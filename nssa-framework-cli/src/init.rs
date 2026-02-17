@@ -239,7 +239,7 @@ tokio = {{ version = "1.28.2", features = ["net", "rt-multi-thread", "sync", "ma
 /// Usage:
 ///   cargo run --bin generate_idl > {name}-idl.json
 
-nssa_framework::generate_idl!("../../methods/guest/src/bin/{snake_name}.rs");
+nssa_framework::generate_idl!("../methods/guest/src/bin/{snake_name}.rs");
 "#));
 
     // CLI wrapper
