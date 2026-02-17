@@ -62,7 +62,7 @@ methods/guest/target/
 SHELL := /bin/bash
 STATE_FILE := .{snake_name}-state
 IDL_FILE := {name}-idl.json
-PROGRAMS_DIR := methods/guest/methods/guest/target/riscv32im-risc0-zkvm-elf/docker
+PROGRAMS_DIR := methods/guest/target/riscv32im-risc0-zkvm-elf/docker
 PROGRAM_BIN := $(PROGRAMS_DIR)/{snake_name}.bin
 
 # Load saved state if it exists
