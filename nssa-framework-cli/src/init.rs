@@ -33,7 +33,7 @@ pub fn init_project(name: &str) {
     // Root Cargo.toml (workspace)
     write_file(root, "Cargo.toml", &format!(r#"[workspace]
 members = [
-    "{name}_core",
+    "{snake_name}_core",
     "methods",
     "methods/guest",
     "examples",
