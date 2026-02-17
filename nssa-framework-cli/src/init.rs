@@ -57,19 +57,13 @@ methods/guest/target/
 # Quick start:
 #   make build idl deploy setup
 #   make cli ARGS="<command> --arg1 value1"
-#
-# Required env:
-#   LSSA_DIR=<path to lssa repo>  (for token binary)
+
 
 SHELL := /bin/bash
 STATE_FILE := .{snake_name}-state
 IDL_FILE := {name}-idl.json
 PROGRAMS_DIR := target/riscv32im-risc0-zkvm-elf/docker
 PROGRAM_BIN := $(PROGRAMS_DIR)/{snake_name}.bin
-
-# Token program binary (from LSSA repo)
-LSSA_DIR ?= $(error Set LSSA_DIR to your lssa repo root, e.g. make build LSSA_DIR=../lssa)
-TOKEN_BIN := $(LSSA_DIR)/artifacts/program_methods/token.bin
 
 # Load saved state if it exists
 -include $(STATE_FILE)
