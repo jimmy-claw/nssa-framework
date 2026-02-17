@@ -783,11 +783,21 @@ fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo]) -> Stri
 // ─── generate_idl! macro implementation ──────────────────────────────────
 
 fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result<TokenStream2> {
+    // Try the path as-is first, then relative to CARGO_MANIFEST_DIR
+    let resolved_path = if std::path::Path::new(file_path).exists() {
+        file_path.to_string()
+    } else if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let p = std::path::Path::new(&manifest_dir).join(file_path);
+        p.to_string_lossy().to_string()
+    } else {
+        file_path.to_string()
+    };
+
     // Read the source file
-    let content = std::fs::read_to_string(file_path).map_err(|e| {
+    let content = std::fs::read_to_string(&resolved_path).map_err(|e| {
         syn::Error::new_spanned(
             span_token,
-            format!("Failed to read '{}': {}", file_path, e),
+            format!("Failed to read '{}' (resolved: '{}'): {}", file_path, resolved_path, e),
         )
     })?;
 
@@ -846,9 +856,14 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     // Generate the IDL JSON
     let idl_json = generate_idl_json(mod_name, &instructions);
 
+    // Embed the resolved path for cargo tracking
+    let resolved = resolved_path.clone();
+
     // Generate a main() that pretty-prints the IDL
     Ok(quote! {
         fn main() {
+            // Help cargo track source changes
+            const _SOURCE: &str = include_str!(#resolved);
             let json: serde_json::Value = serde_json::from_str(#idl_json)
                 .expect("Generated IDL JSON is invalid");
             println!("{}", serde_json::to_string_pretty(&json).unwrap());
