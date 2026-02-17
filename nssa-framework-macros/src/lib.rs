@@ -1,7 +1,8 @@
 //! # NSSA Framework Proc Macros
 //!
 //! This crate provides the `#[nssa_program]` attribute macro that eliminates
-//! boilerplate in NSSA/LEZ guest binaries.
+//! boilerplate in NSSA/LEZ guest binaries, and the `generate_idl!` macro
+//! for extracting IDL from program source files.
 //!
 //! ## Usage
 //!
@@ -12,29 +13,37 @@
 //! mod my_program {
 //!     #[instruction]
 //!     pub fn create(
-//!         #[account(init)] state: AccountWithMetadata,
+//!         #[account(init, pda = const("my_state"))]
+//!         state: AccountWithMetadata,
 //!         name: String,
 //!     ) -> NssaResult {
 //!         // business logic only
 //!     }
 //! }
 //! ```
+//!
+//! ## IDL Generation
+//!
+//! ```rust,ignore
+//! // generate_idl.rs — one-liner!
+//! nssa_framework::generate_idl!("src/bin/treasury.rs");
+//! ```
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, parse_quote, Attribute, FnArg, Ident, ItemFn, ItemMod, Pat, PatType,
-    ReturnType, Type,
+    parse_macro_input, Attribute, FnArg, Ident, ItemFn, ItemMod, Pat, PatType, Type,
 };
 
 /// Main entry point: `#[nssa_program]` on a module.
 ///
 /// This macro:
 /// 1. Finds all `#[instruction]` functions in the module
-/// 2. Generates a Borsh-serializable `Instruction` enum
+/// 2. Generates a serde-serializable `Instruction` enum
 /// 3. Generates the `fn main()` with read/dispatch/write boilerplate
 /// 4. Generates account validation code per instruction
+/// 5. Generates `PROGRAM_IDL_JSON` const with complete IDL (including PDA seeds)
 #[proc_macro_attribute]
 pub fn nssa_program(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemMod);
@@ -48,8 +57,26 @@ pub fn nssa_program(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Processed by `#[nssa_program]`, not standalone.
 #[proc_macro_attribute]
 pub fn instruction(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Pass through — actual processing happens in nssa_program
     item
+}
+
+/// Generate IDL from a program source file.
+///
+/// Parses the given Rust source file, finds the `#[nssa_program]` module,
+/// and generates a `fn main()` that prints the complete IDL as JSON.
+///
+/// ```rust,ignore
+/// nssa_framework_macros::generate_idl!("../../methods/guest/src/bin/treasury.rs");
+/// ```
+#[proc_macro]
+pub fn generate_idl(input: TokenStream) -> TokenStream {
+    let lit = parse_macro_input!(input as syn::LitStr);
+    let file_path = lit.value();
+
+    match expand_generate_idl(&file_path, &lit) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
 }
 
 // ─── Internal expansion logic ────────────────────────────────────────────
@@ -76,6 +103,18 @@ struct AccountConstraints {
     init: bool,
     owner: Option<syn::Expr>,
     signer: bool,
+    pda_seeds: Vec<PdaSeedDef>,
+}
+
+/// A PDA seed definition from the `#[account(pda = ...)]` attribute.
+#[derive(Clone)]
+enum PdaSeedDef {
+    /// `const("some_string")` — a constant string seed
+    Const(String),
+    /// `account("other_account_name")` — seed derived from another account's ID
+    Account(String),
+    /// `arg("some_arg")` — seed derived from an instruction argument
+    Arg(String),
 }
 
 struct ArgParam {
@@ -169,13 +208,17 @@ fn expand_nssa_program(input: ItemMod) -> syn::Result<TokenStream2> {
         }
     };
 
-    // Generate IDL function
+    // Generate IDL function and const JSON
     let idl_fn = generate_idl_fn(mod_name, &instructions);
+    let idl_json = generate_idl_json(mod_name, &instructions);
 
     // Assemble everything
     let expanded = quote! {
         // The instruction enum (used by both on-chain and client)
         #enum_def
+
+        // Complete IDL as a const JSON string (accessible from any target)
+        pub const PROGRAM_IDL_JSON: &str = #idl_json;
 
         // The program module with handler functions
         mod #mod_name {
@@ -267,14 +310,13 @@ fn parse_account_constraints(attrs: &[Attribute]) -> syn::Result<AccountConstrai
 
     for attr in attrs {
         if attr.path().is_ident("account") {
-            // Parse the token stream inside #[account(...)]
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("mut") {
                     constraints.mutable = true;
                     Ok(())
                 } else if meta.path.is_ident("init") {
                     constraints.init = true;
-                    constraints.mutable = true; // init implies mut
+                    constraints.mutable = true;
                     Ok(())
                 } else if meta.path.is_ident("signer") {
                     constraints.signer = true;
@@ -283,6 +325,12 @@ fn parse_account_constraints(attrs: &[Attribute]) -> syn::Result<AccountConstrai
                     let value = meta.value()?;
                     let expr: syn::Expr = value.parse()?;
                     constraints.owner = Some(expr);
+                    Ok(())
+                } else if meta.path.is_ident("pda") {
+                    // Parse PDA seeds: pda = const("value"), pda = account("name"), pda = arg("name")
+                    let value = meta.value()?;
+                    let expr: syn::Expr = value.parse()?;
+                    constraints.pda_seeds = parse_pda_expr(&expr)?;
                     Ok(())
                 } else {
                     Err(meta.error("unknown account constraint"))
@@ -294,11 +342,86 @@ fn parse_account_constraints(attrs: &[Attribute]) -> syn::Result<AccountConstrai
     Ok(constraints)
 }
 
-/// Generate enum variants from instruction functions.
+/// Parse PDA seed expressions.
 ///
-/// `fn create(#[account] a: ..., #[account] b: ..., name: String, supply: u128)`
-/// becomes:
-/// `Create { name: String, supply: u128 }`
+/// Supports:
+/// - `const("string")` — constant seed
+/// - `account("name")` — account-derived seed
+/// - `arg("name")` — argument-derived seed
+/// - `[const("a"), account("b")]` — multiple seeds (array syntax)
+fn parse_pda_expr(expr: &syn::Expr) -> syn::Result<Vec<PdaSeedDef>> {
+    match expr {
+        // Single seed: const("value") or account("name")
+        syn::Expr::Call(call) => {
+            let seed = parse_single_pda_seed(call)?;
+            Ok(vec![seed])
+        }
+        // Multiple seeds: [const("a"), account("b")]
+        syn::Expr::Array(arr) => {
+            let mut seeds = Vec::new();
+            for elem in &arr.elems {
+                if let syn::Expr::Call(call) = elem {
+                    seeds.push(parse_single_pda_seed(call)?);
+                } else {
+                    return Err(syn::Error::new_spanned(
+                        elem,
+                        "PDA seed must be const(\"...\"), account(\"...\"), or arg(\"...\")",
+                    ));
+                }
+            }
+            Ok(seeds)
+        }
+        _ => Err(syn::Error::new_spanned(
+            expr,
+            "PDA seed must be const(\"...\"), account(\"...\"), arg(\"...\"), or [seed, ...]",
+        )),
+    }
+}
+
+fn parse_single_pda_seed(call: &syn::ExprCall) -> syn::Result<PdaSeedDef> {
+    let func_name = if let syn::Expr::Path(path) = &*call.func {
+        path.path
+            .get_ident()
+            .map(|i| i.to_string())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    if call.args.len() != 1 {
+        return Err(syn::Error::new_spanned(
+            call,
+            "PDA seed function takes exactly one string argument",
+        ));
+    }
+
+    let arg = &call.args[0];
+    let string_val = if let syn::Expr::Lit(lit) = arg {
+        if let syn::Lit::Str(s) = &lit.lit {
+            s.value()
+        } else {
+            return Err(syn::Error::new_spanned(arg, "Expected string literal"));
+        }
+    } else {
+        return Err(syn::Error::new_spanned(arg, "Expected string literal"));
+    };
+
+    match func_name.as_str() {
+        "const" | "r#const" | "seed_const" | "literal" => Ok(PdaSeedDef::Const(string_val)),
+        "account" => Ok(PdaSeedDef::Account(string_val)),
+        "arg" => Ok(PdaSeedDef::Arg(string_val)),
+        _ => Err(syn::Error::new_spanned(
+            call,
+            format!(
+                "Unknown PDA seed type '{}'. Use const(\"...\"), account(\"...\"), or arg(\"...\")",
+                func_name
+            ),
+        )),
+    }
+}
+
+// ─── Code generation helpers ─────────────────────────────────────────────
+
 fn generate_enum_variants(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
         .iter()
@@ -323,7 +446,6 @@ fn generate_enum_variants(instructions: &[InstructionInfo]) -> Vec<TokenStream2>
         .collect()
 }
 
-/// Generate match arms for instruction dispatch.
 fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
         .iter()
@@ -332,7 +454,6 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
             let fn_name = &ix.fn_name;
             let num_accounts = ix.accounts.len();
 
-            // Destructure pattern for enum fields
             let field_names: Vec<&Ident> = ix.args.iter().map(|a| &a.name).collect();
             let pattern = if field_names.is_empty() {
                 quote! { Instruction::#variant_name }
@@ -340,7 +461,6 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                 quote! { Instruction::#variant_name { #(#field_names),* } }
             };
 
-            // Account destructuring
             let account_names: Vec<&Ident> = ix.accounts.iter().map(|a| &a.name).collect();
             let account_destructure = quote! {
                 let [#(#account_names),*] = <[_; #num_accounts]>::try_from(pre_states)
@@ -350,7 +470,6 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                     ));
             };
 
-            // Call the handler
             let call_args: Vec<TokenStream2> = ix
                 .accounts
                 .iter()
@@ -375,37 +494,26 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
         .collect()
 }
 
-/// Generate handler functions with macro attributes stripped.
 fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
         .iter()
         .map(|ix| {
             let mut func = ix.func.clone();
-            
-            // Strip #[instruction] attribute
             func.attrs.retain(|a| !a.path().is_ident("instruction"));
-            
-            // Strip #[account(...)] attributes from parameters
             for input in &mut func.sig.inputs {
                 if let FnArg::Typed(pat_type) = input {
                     pat_type.attrs.retain(|a| !a.path().is_ident("account"));
                 }
             }
-
             quote! { #func }
         })
         .collect()
 }
 
-/// Generate validation helper functions (one per instruction).
-fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
-    // In a full implementation, this would generate per-instruction
-    // validation that checks constraints before calling handlers.
-    // For the PoC, validation is embedded in the match arms.
+fn generate_validation(_instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     vec![]
 }
 
-/// Convert snake_case to PascalCase for enum variant names.
 fn to_pascal_case(ident: &Ident) -> Ident {
     let s = ident.to_string();
     let pascal: String = s
@@ -421,16 +529,16 @@ fn to_pascal_case(ident: &Ident) -> Ident {
     format_ident!("{}", pascal)
 }
 
-/// Convert a Rust type to an IDL type string.
+// ─── IDL type conversion ─────────────────────────────────────────────────
+
 fn rust_type_to_idl_string(ty: &Type) -> String {
     match ty {
         Type::Path(type_path) => {
             let segment = type_path.path.segments.last().unwrap();
             let ident = segment.ident.to_string();
             match ident.as_str() {
-                "u8" | "u16" | "u32" | "u64" | "u128" |
-                "i8" | "i16" | "i32" | "i64" | "i128" |
-                "bool" | "String" => ident.to_lowercase(),
+                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64"
+                | "i128" | "bool" | "String" => ident.to_lowercase(),
                 "Vec" => {
                     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                         if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
@@ -448,7 +556,6 @@ fn rust_type_to_idl_string(ty: &Type) -> String {
         }
         Type::Array(arr) => {
             let elem = rust_type_to_idl_string(&arr.elem);
-            // Try to extract the length
             if let syn::Expr::Lit(lit) = &arr.len {
                 if let syn::Lit::Int(n) = &lit.lit {
                     return format!("[{}; {}]", elem, n);
@@ -460,53 +567,131 @@ fn rust_type_to_idl_string(ty: &Type) -> String {
     }
 }
 
-/// Generate a function that returns the program IDL.
+/// Convert a Rust IDL type string to the JSON representation.
+/// This produces a JSON value string for embedding in const IDL JSON.
+fn rust_type_to_idl_json(ty: &Type) -> String {
+    match ty {
+        Type::Path(type_path) => {
+            let segment = type_path.path.segments.last().unwrap();
+            let ident = segment.ident.to_string();
+            match ident.as_str() {
+                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64"
+                | "i128" | "bool" | "String" => {
+                    format!("\"{}\"", ident.to_lowercase())
+                }
+                "Vec" => {
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            format!("{{\"vec\":{}}}", rust_type_to_idl_json(inner))
+                        } else {
+                            "\"vec<unknown>\"".to_string()
+                        }
+                    } else {
+                        "\"vec<unknown>\"".to_string()
+                    }
+                }
+                "ProgramId" => "\"program_id\"".to_string(),
+                other => format!("{{\"defined\":\"{}\"}}", other),
+            }
+        }
+        Type::Array(arr) => {
+            let elem = rust_type_to_idl_json(&arr.elem);
+            if let syn::Expr::Lit(lit) = &arr.len {
+                if let syn::Lit::Int(n) = &lit.lit {
+                    return format!("{{\"array\":[{},{}]}}", elem, n);
+                }
+            }
+            format!("{{\"array\":[{},0]}}", elem)
+        }
+        _ => "\"unknown\"".to_string(),
+    }
+}
+
+// ─── IDL generation (code-based, for __program_idl()) ────────────────────
+
 fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenStream2 {
     let program_name = mod_name.to_string();
 
-    let instruction_literals: Vec<TokenStream2> = instructions.iter().map(|ix| {
-        let ix_name = ix.fn_name.to_string();
+    let instruction_literals: Vec<TokenStream2> = instructions
+        .iter()
+        .map(|ix| {
+            let ix_name = ix.fn_name.to_string();
 
-        let account_literals: Vec<TokenStream2> = ix.accounts.iter().map(|acc| {
-            let acc_name = acc.name.to_string();
-            let writable = acc.constraints.mutable;
-            let signer = acc.constraints.signer;
-            let init = acc.constraints.init;
+            let account_literals: Vec<TokenStream2> = ix
+                .accounts
+                .iter()
+                .map(|acc| {
+                    let acc_name = acc.name.to_string();
+                    let writable = acc.constraints.mutable;
+                    let signer = acc.constraints.signer;
+                    let init = acc.constraints.init;
+
+                    let pda_expr = if acc.constraints.pda_seeds.is_empty() {
+                        quote! { None }
+                    } else {
+                        let seed_literals: Vec<TokenStream2> = acc
+                            .constraints
+                            .pda_seeds
+                            .iter()
+                            .map(|seed| match seed {
+                                PdaSeedDef::Const(val) => quote! {
+                                    nssa_framework_core::idl::IdlSeed::Const { value: #val.to_string() }
+                                },
+                                PdaSeedDef::Account(name) => quote! {
+                                    nssa_framework_core::idl::IdlSeed::Account { path: #name.to_string() }
+                                },
+                                PdaSeedDef::Arg(name) => quote! {
+                                    nssa_framework_core::idl::IdlSeed::Arg { path: #name.to_string() }
+                                },
+                            })
+                            .collect();
+
+                        quote! {
+                            Some(nssa_framework_core::idl::IdlPda {
+                                seeds: vec![#(#seed_literals),*],
+                            })
+                        }
+                    };
+
+                    quote! {
+                        nssa_framework_core::idl::IdlAccountItem {
+                            name: #acc_name.to_string(),
+                            writable: #writable,
+                            signer: #signer,
+                            init: #init,
+                            owner: None,
+                            pda: #pda_expr,
+                        }
+                    }
+                })
+                .collect();
+
+            let arg_literals: Vec<TokenStream2> = ix
+                .args
+                .iter()
+                .map(|arg| {
+                    let arg_name = arg.name.to_string();
+                    let type_str = rust_type_to_idl_string(&arg.ty);
+                    quote! {
+                        nssa_framework_core::idl::IdlArg {
+                            name: #arg_name.to_string(),
+                            type_: nssa_framework_core::idl::IdlType::Primitive(#type_str.to_string()),
+                        }
+                    }
+                })
+                .collect();
+
             quote! {
-                nssa_framework_core::idl::IdlAccountItem {
-                    name: #acc_name.to_string(),
-                    writable: #writable,
-                    signer: #signer,
-                    init: #init,
-                    owner: None,
-                    pda: None,
+                nssa_framework_core::idl::IdlInstruction {
+                    name: #ix_name.to_string(),
+                    accounts: vec![#(#account_literals),*],
+                    args: vec![#(#arg_literals),*],
                 }
             }
-        }).collect();
-
-        let arg_literals: Vec<TokenStream2> = ix.args.iter().map(|arg| {
-            let arg_name = arg.name.to_string();
-            let type_str = rust_type_to_idl_string(&arg.ty);
-            quote! {
-                nssa_framework_core::idl::IdlArg {
-                    name: #arg_name.to_string(),
-                    type_: nssa_framework_core::idl::IdlType::Primitive(#type_str.to_string()),
-                }
-            }
-        }).collect();
-
-        quote! {
-            nssa_framework_core::idl::IdlInstruction {
-                name: #ix_name.to_string(),
-                accounts: vec![#(#account_literals),*],
-                args: vec![#(#arg_literals),*],
-            }
-        }
-    }).collect();
+        })
+        .collect();
 
     quote! {
-        /// Returns the IDL (Interface Definition Language) for this program.
-        /// Use this to generate CLI tools, client SDKs, or documentation.
         #[allow(dead_code)]
         pub fn __program_idl() -> nssa_framework_core::idl::NssaIdl {
             nssa_framework_core::idl::NssaIdl {
@@ -519,4 +704,154 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenS
             }
         }
     }
+}
+
+// ─── IDL generation (JSON string, for PROGRAM_IDL_JSON const) ────────────
+
+fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo]) -> String {
+    let program_name = mod_name.to_string();
+
+    let instructions_json: Vec<String> = instructions
+        .iter()
+        .map(|ix| {
+            let ix_name = &ix.fn_name.to_string();
+
+            let accounts_json: Vec<String> = ix
+                .accounts
+                .iter()
+                .map(|acc| {
+                    let name = acc.name.to_string();
+                    let writable = acc.constraints.mutable;
+                    let signer = acc.constraints.signer;
+                    let init = acc.constraints.init;
+
+                    let pda_json = if acc.constraints.pda_seeds.is_empty() {
+                        String::new()
+                    } else {
+                        let seeds: Vec<String> = acc
+                            .constraints
+                            .pda_seeds
+                            .iter()
+                            .map(|seed| match seed {
+                                PdaSeedDef::Const(val) => {
+                                    format!("{{\"kind\":\"const\",\"value\":\"{}\"}}", val)
+                                }
+                                PdaSeedDef::Account(name) => {
+                                    format!("{{\"kind\":\"account\",\"path\":\"{}\"}}", name)
+                                }
+                                PdaSeedDef::Arg(name) => {
+                                    format!("{{\"kind\":\"arg\",\"path\":\"{}\"}}", name)
+                                }
+                            })
+                            .collect();
+                        format!(",\"pda\":{{\"seeds\":[{}]}}", seeds.join(","))
+                    };
+
+                    format!(
+                        "{{\"name\":\"{}\",\"writable\":{},\"signer\":{},\"init\":{}{}}}",
+                        name, writable, signer, init, pda_json
+                    )
+                })
+                .collect();
+
+            let args_json: Vec<String> = ix
+                .args
+                .iter()
+                .map(|arg| {
+                    let name = arg.name.to_string();
+                    let type_json = rust_type_to_idl_json(&arg.ty);
+                    format!("{{\"name\":\"{}\",\"type\":{}}}", name, type_json)
+                })
+                .collect();
+
+            format!(
+                "{{\"name\":\"{}\",\"accounts\":[{}],\"args\":[{}]}}",
+                ix_name,
+                accounts_json.join(","),
+                args_json.join(",")
+            )
+        })
+        .collect();
+
+    format!(
+        "{{\"version\":\"0.1.0\",\"name\":\"{}\",\"instructions\":[{}],\"accounts\":[],\"types\":[],\"errors\":[]}}",
+        program_name,
+        instructions_json.join(",")
+    )
+}
+
+// ─── generate_idl! macro implementation ──────────────────────────────────
+
+fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result<TokenStream2> {
+    // Read the source file
+    let content = std::fs::read_to_string(file_path).map_err(|e| {
+        syn::Error::new_spanned(
+            span_token,
+            format!("Failed to read '{}': {}", file_path, e),
+        )
+    })?;
+
+    // Parse as a Rust file
+    let file = syn::parse_file(&content).map_err(|e| {
+        syn::Error::new_spanned(
+            span_token,
+            format!("Failed to parse '{}': {}", file_path, e),
+        )
+    })?;
+
+    // Find the #[nssa_program] module
+    let mut program_mod: Option<&ItemMod> = None;
+    for item in &file.items {
+        if let syn::Item::Mod(m) = item {
+            if m.attrs.iter().any(|a| a.path().is_ident("nssa_program")) {
+                program_mod = Some(m);
+                break;
+            }
+        }
+    }
+
+    let program_mod = program_mod.ok_or_else(|| {
+        syn::Error::new_spanned(
+            span_token,
+            format!(
+                "No #[nssa_program] module found in '{}'",
+                file_path
+            ),
+        )
+    })?;
+
+    let mod_name = &program_mod.ident;
+
+    let (_, items) = program_mod.content.as_ref().ok_or_else(|| {
+        syn::Error::new_spanned(span_token, "nssa_program module has no body")
+    })?;
+
+    // Parse instructions
+    let mut instructions: Vec<InstructionInfo> = Vec::new();
+    for item in items {
+        if let syn::Item::Fn(func) = item {
+            if has_instruction_attr(&func.attrs) {
+                instructions.push(parse_instruction(func.clone())?);
+            }
+        }
+    }
+
+    if instructions.is_empty() {
+        return Err(syn::Error::new_spanned(
+            span_token,
+            "No #[instruction] functions found in the program module",
+        ));
+    }
+
+    // Generate the IDL JSON
+    let idl_json = generate_idl_json(mod_name, &instructions);
+
+    // Generate a main() that pretty-prints the IDL
+    Ok(quote! {
+        fn main() {
+            let json: serde_json::Value = serde_json::from_str(#idl_json)
+                .expect("Generated IDL JSON is invalid");
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+        }
+    })
 }

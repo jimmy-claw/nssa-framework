@@ -4,7 +4,7 @@
 //! similar to Anchor for Solana.
 
 // Re-export the proc macros
-pub use nssa_framework_macros::{nssa_program, instruction};
+pub use nssa_framework_macros::{nssa_program, instruction, generate_idl};
 
 // Re-export core types
 pub use nssa_framework_core::*;
