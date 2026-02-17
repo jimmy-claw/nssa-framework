@@ -35,8 +35,10 @@ pub fn init_project(name: &str) {
 members = [
     "{snake_name}_core",
     "methods",
-    "methods/guest",
     "examples",
+]
+exclude = [
+    "methods/guest",
 ]
 resolver = "2"
 "#));
