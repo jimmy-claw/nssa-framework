@@ -44,24 +44,104 @@ resolver = "2"
 "#));
 
     // .gitignore
-    write_file(root, ".gitignore", r#"target/
+    write_file(root, ".gitignore", &format!(r#"target/
 methods/guest/target/
 *.bin
-.{name}-state
-.{name}-state.tmp
-"#);
+.{snake_name}-state
+.{snake_name}-state.tmp
+"#));
 
     // Makefile
-    write_file(root, "Makefile", &format!(r#".PHONY: build idl cli
+    write_file(root, "Makefile", &format!(r#"# {name} — NSSA Program
+#
+# Quick start:
+#   make build idl deploy setup
+#   make cli ARGS="<command> --arg1 value1"
+#
+# Required env:
+#   LSSA_DIR=<path to lssa repo>  (for token binary)
 
-build:
-	cd methods && cargo build
+SHELL := /bin/bash
+STATE_FILE := .{snake_name}-state
+IDL_FILE := {name}-idl.json
+PROGRAMS_DIR := target/riscv32im-risc0-zkvm-elf/docker
+PROGRAM_BIN := $(PROGRAMS_DIR)/{snake_name}.bin
 
-idl:
-	cargo run --bin generate_idl > {name}-idl.json
+# Token program binary (from LSSA repo)
+LSSA_DIR ?= $(error Set LSSA_DIR to your lssa repo root, e.g. make build LSSA_DIR=../lssa)
+TOKEN_BIN := $(LSSA_DIR)/artifacts/program_methods/token.bin
 
-cli:
-	cargo run --bin {snake_name}_cli -- -i {name}-idl.json $(ARGS)
+# Load saved state if it exists
+-include $(STATE_FILE)
+
+define save_var
+	@grep -v '^$(1)=' $(STATE_FILE) 2>/dev/null > $(STATE_FILE).tmp || true
+	@echo '$(1)=$(2)' >> $(STATE_FILE).tmp
+	@mv $(STATE_FILE).tmp $(STATE_FILE)
+endef
+
+.PHONY: help build idl cli deploy setup inspect status clean
+
+help: ## Show this help
+	@echo "{name} — NSSA Program"
+	@echo ""
+	@echo "  make build       Build the guest binary (needs risc0 toolchain)"
+	@echo "  make idl         Generate IDL from program source"
+	@echo "  make cli ARGS=   Run the IDL-driven CLI (pass args via ARGS=)"
+	@echo "  make deploy      Deploy program to sequencer"
+	@echo "  make setup       Create accounts needed for the program"
+	@echo "  make inspect     Show ProgramId for built binary"
+	@echo "  make status      Show saved state and binary info"
+	@echo "  make clean       Remove saved state"
+	@echo ""
+	@echo "Example:"
+	@echo "  make build idl deploy"
+	@echo "  make cli ARGS=\"--help\""
+	@echo "  make cli ARGS=\"-p $(PROGRAM_BIN) <command> --arg1 value1\""
+
+build: ## Build the guest binary
+	cargo risczero build --manifest-path methods/guest/Cargo.toml
+	@echo ""
+	@echo "✅ Guest binary built: $(PROGRAM_BIN)"
+	@ls -la $(PROGRAM_BIN) 2>/dev/null || true
+
+idl: ## Generate IDL JSON from program source
+	cargo run --bin generate_idl > $(IDL_FILE)
+	@echo "✅ IDL written to $(IDL_FILE)"
+
+cli: ## Run the IDL-driven CLI (ARGS="...")
+	cargo run --bin {snake_name}_cli -- -i $(IDL_FILE) $(ARGS)
+
+deploy: ## Deploy program to sequencer
+	@test -f "$(PROGRAM_BIN)" || (echo "ERROR: Binary not found. Run 'make build' first."; exit 1)
+	wallet deploy-program $(PROGRAM_BIN)
+	@echo "✅ Program deployed"
+
+inspect: ## Show ProgramId for built binary
+	cargo run --bin {snake_name}_cli -- -i $(IDL_FILE) inspect $(PROGRAM_BIN)
+
+setup: ## Create accounts needed for the program
+	@echo "Creating signer account..."
+	$(eval SIGNER_ID := $(shell wallet account new public 2>&1 | sed -n 's/.*Public\/\([A-Za-z0-9]*\).*/\1/p'))
+	@echo "Signer: $(SIGNER_ID)"
+	$(call save_var,SIGNER_ID,$(SIGNER_ID))
+	@echo ""
+	@echo "✅ Account saved to $(STATE_FILE)"
+
+status: ## Show saved state and binary info
+	@echo "{name} Status"
+	@echo "──────────────────────────────────────"
+	@if [ -f "$(STATE_FILE)" ]; then cat $(STATE_FILE); else echo "(no state — run 'make setup')"; fi
+	@echo ""
+	@echo "Binaries:"
+	@ls -la $(PROGRAM_BIN) 2>/dev/null || echo "  {snake_name}.bin: NOT BUILT (run 'make build')"
+	@echo ""
+	@echo "IDL:"
+	@ls -la $(IDL_FILE) 2>/dev/null || echo "  $(IDL_FILE): NOT GENERATED (run 'make idl')"
+
+clean: ## Remove saved state
+	rm -f $(STATE_FILE) $(STATE_FILE).tmp
+	@echo "✅ State cleaned"
 "#));
 
     // README
@@ -69,39 +149,76 @@ cli:
 
 An NSSA/LEZ program built with [nssa-framework](https://github.com/jimmy-claw/nssa-framework).
 
+## Prerequisites
+
+- Rust + [risc0 toolchain](https://dev.risczero.com/api/zkvm/install)
+- [LSSA wallet CLI](https://github.com/logos-blockchain/lssa) (`wallet` binary)
+- A running sequencer
+
 ## Quick Start
 
-### 1. Build the guest program
-
 ```bash
-cd methods && cargo build
-```
+# 1. Build the guest binary
+make build
 
-### 2. Generate the IDL
-
-```bash
+# 2. Generate the IDL (auto-extracts from #[nssa_program] annotations)
 make idl
-# or: cargo run --bin generate_idl > {name}-idl.json
-```
 
-### 3. Use the CLI
+# 3. Deploy to sequencer
+make deploy
 
-```bash
-# Show available commands (auto-generated from IDL):
+# 4. See available commands (auto-generated from your program)
 make cli ARGS="--help"
 
-# Dry run an instruction:
-make cli ARGS="--dry-run -p path/to/{name}.bin <command> --arg1 value1"
+# 5. Run an instruction
+make cli ARGS="-p target/riscv32im-risc0-zkvm-elf/docker/{snake_name}.bin \\
+  <command> --arg1 value1 --arg2 value2"
 
-# Submit a transaction:
-make cli ARGS="-p path/to/{name}.bin <command> --arg1 value1"
+# Dry run (no submission):
+make cli ARGS="--dry-run -p target/riscv32im-risc0-zkvm-elf/docker/{snake_name}.bin \\
+  <command> --arg1 value1"
 ```
+
+## Make Targets
+
+| Target | Description |
+|--------|-------------|
+| `make build` | Build the guest binary (risc0) |
+| `make idl` | Generate IDL JSON from program source |
+| `make cli ARGS="..."` | Run the IDL-driven CLI |
+| `make deploy` | Deploy program to sequencer |
+| `make inspect` | Show ProgramId for built binary |
+| `make setup` | Create accounts via wallet |
+| `make status` | Show saved state and binary info |
+| `make clean` | Remove saved state |
 
 ## Project Structure
 
-- **`{snake_name}_core/`** — Shared types and structs (used by guest + host)
-- **`methods/guest/`** — The RISC Zero guest program (runs on-chain)
-- **`examples/`** — CLI tools (IDL generator + generic CLI wrapper)
+```
+{name}/
+├── {snake_name}_core/    # Shared types (used by guest + host)
+│   └── src/lib.rs
+├── methods/
+│   └── guest/            # RISC Zero guest program (runs on-chain)
+│       └── src/bin/{snake_name}.rs
+├── examples/             # CLI tools
+│   └── src/bin/
+│       ├── generate_idl.rs    # One-liner IDL generator
+│       └── {snake_name}_cli.rs # Three-line CLI wrapper
+├── Makefile
+└── {name}-idl.json       # Auto-generated IDL
+```
+
+## How It Works
+
+The `#[nssa_program]` macro in your guest binary defines your on-chain program.
+The framework automatically:
+
+1. **Generates an `Instruction` enum** from your function signatures
+2. **Generates an IDL** (Interface Description Language) describing your program
+3. **Provides a full CLI** for building, inspecting, and submitting transactions
+
+You write the program logic. The framework handles the rest.
 "#));
 
     // program_core
