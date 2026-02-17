@@ -62,7 +62,7 @@ methods/guest/target/
 SHELL := /bin/bash
 STATE_FILE := .{snake_name}-state
 IDL_FILE := {name}-idl.json
-PROGRAMS_DIR := target/riscv32im-risc0-zkvm-elf/docker
+PROGRAMS_DIR := methods/guest/methods/guest/target/riscv32im-risc0-zkvm-elf/docker
 PROGRAM_BIN := $(PROGRAMS_DIR)/{snake_name}.bin
 
 # Load saved state if it exists
@@ -165,11 +165,11 @@ make deploy
 make cli ARGS="--help"
 
 # 5. Run an instruction
-make cli ARGS="-p target/riscv32im-risc0-zkvm-elf/docker/{snake_name}.bin \\
+make cli ARGS="-p methods/guest/target/riscv32im-risc0-zkvm-elf/docker/{snake_name}.bin \\
   <command> --arg1 value1 --arg2 value2"
 
 # Dry run (no submission):
-make cli ARGS="--dry-run -p target/riscv32im-risc0-zkvm-elf/docker/{snake_name}.bin \\
+make cli ARGS="--dry-run -p methods/guest/target/riscv32im-risc0-zkvm-elf/docker/{snake_name}.bin \\
   <command> --arg1 value1"
 ```
 
