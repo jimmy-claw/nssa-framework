@@ -285,10 +285,9 @@ borsh = "1.5"
     // Guest program skeleton
     write_file(root, &format!("methods/guest/src/bin/{}.rs", snake_name), &format!(r#"#![no_main]
 
-use nssa_core::account::{{Account, AccountId, AccountWithMetadata}};
-use nssa_core::program::{{AccountPostState, ProgramId}};
+use nssa_core::account::AccountWithMetadata;
+use nssa_core::program::AccountPostState;
 use nssa_framework::prelude::*;
-use {snake_name}_core::ProgramState;
 
 risc0_zkvm::guest::entry!(main);
 
@@ -304,8 +303,12 @@ mod {snake_name} {{
         state: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
-    ) {{
+    ) -> NssaResult {{
         // TODO: implement initialization logic
+        Ok(NssaOutput::new(vec![
+            AccountPostState::new_claimed(state.account.clone()),
+            AccountPostState::new(owner.account.clone()),
+        ]))
     }}
 
     /// Example instruction — replace with your own.
@@ -315,9 +318,13 @@ mod {snake_name} {{
         state: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
-        amount: u64,
-    ) {{
+        _amount: u64,
+    ) -> NssaResult {{
         // TODO: implement your logic
+        Ok(NssaOutput::new(vec![
+            AccountPostState::new(state.account.clone()),
+            AccountPostState::new(owner.account.clone()),
+        ]))
     }}
 }}
 "#));
