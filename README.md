@@ -1,5 +1,7 @@
 # nssa-framework
 
+[![CI](https://github.com/jimmy-claw/nssa-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/jimmy-claw/nssa-framework/actions/workflows/ci.yml)
+
 Developer framework for building NSSA/LEZ programs — inspired by [Anchor](https://www.anchor-lang.com/) for Solana.
 
 Write your program logic with proc macros. Get IDL generation, a full CLI with TX submission, and project scaffolding for free.
@@ -100,6 +102,27 @@ mod my_program {
 | `#[account(signer)]` | Account must sign the transaction |
 | `#[account(pda = literal("seed"))]` | PDA derived from a constant string |
 | `#[account(pda = account("other"))]` | PDA derived from another account's ID |
+| `#[account(pda = arg("create_key"))]` | PDA derived from an instruction argument |
+
+### Runtime Validation
+
+Accounts marked with `#[account(signer)]` or `#[account(init)]` get **automatic runtime checks** before your handler runs:
+
+- **Signer**: Verifies `is_authorized` is true, returns `NssaError::Unauthorized` if not
+- **Init**: Verifies account is in default state, returns `NssaError::AccountAlreadyInitialized` if not
+
+No manual checking needed in your instruction handlers.
+
+### External Instruction Enum
+
+If your `Instruction` enum lives in a shared core crate (used by both on-chain program and CLI), you can tell the macro to use it instead of generating one:
+
+```rust
+#[nssa_program(instruction = "my_core::Instruction")]
+mod my_program {
+    // ...
+}
+```
 
 ### The CLI Wrapper
 
