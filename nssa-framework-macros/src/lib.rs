@@ -33,6 +33,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
+    parse::Parser,
     parse_macro_input, Attribute, FnArg, Ident, ItemFn, ItemMod, Pat, PatType, Type,
 };
 
@@ -44,10 +45,50 @@ use syn::{
 /// 3. Generates the `fn main()` with read/dispatch/write boilerplate
 /// 4. Generates account validation code per instruction
 /// 5. Generates `PROGRAM_IDL_JSON` const with complete IDL (including PDA seeds)
+/// Program-level configuration parsed from `#[nssa_program(...)]` attributes.
+struct ProgramConfig {
+    /// External instruction enum path, e.g. `my_crate::Instruction`.
+    /// If set, the macro will NOT generate its own `Instruction` enum.
+    external_instruction: Option<syn::Path>,
+}
+
+impl ProgramConfig {
+    fn parse(attr: TokenStream) -> syn::Result<Self> {
+        let mut config = ProgramConfig {
+            external_instruction: None,
+        };
+        if attr.is_empty() {
+            return Ok(config);
+        }
+        let parser = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
+        let metas = parser.parse(attr)?;
+        for meta in metas {
+            if let syn::Meta::NameValue(nv) = &meta {
+                if nv.path.is_ident("instruction") {
+                    if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value {
+                        config.external_instruction = Some(s.parse()?);
+                    } else {
+                        return Err(syn::Error::new_spanned(&nv.value, "expected string literal"));
+                    }
+                } else {
+                    return Err(syn::Error::new_spanned(&nv.path, "unknown attribute"));
+                }
+            } else {
+                return Err(syn::Error::new_spanned(&meta, "expected name = value"));
+            }
+        }
+        Ok(config)
+    }
+}
+
 #[proc_macro_attribute]
-pub fn nssa_program(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn nssa_program(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let config = match ProgramConfig::parse(attr) {
+        Ok(c) => c,
+        Err(err) => return err.to_compile_error().into(),
+    };
     let input = parse_macro_input!(item as ItemMod);
-    match expand_nssa_program(input) {
+    match expand_nssa_program(input, config) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
@@ -122,7 +163,7 @@ struct ArgParam {
     ty: Type,
 }
 
-fn expand_nssa_program(input: ItemMod) -> syn::Result<TokenStream2> {
+fn expand_nssa_program(input: ItemMod, config: ProgramConfig) -> syn::Result<TokenStream2> {
     let mod_name = &input.ident;
 
     let (_, items) = input
@@ -156,12 +197,20 @@ fn expand_nssa_program(input: ItemMod) -> syn::Result<TokenStream2> {
         ));
     }
 
-    // Generate the Instruction enum
-    let enum_variants = generate_enum_variants(&instructions);
-    let enum_def = quote! {
-        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-        pub enum Instruction {
-            #(#enum_variants),*
+    // Generate the Instruction enum (or use external one)
+    let enum_def = if config.external_instruction.is_none() {
+        let enum_variants = generate_enum_variants(&instructions);
+        quote! {
+            #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+            pub enum Instruction {
+                #(#enum_variants),*
+            }
+        }
+    } else {
+        // External instruction: import it as `Instruction` if it's not already named that
+        let path = config.external_instruction.as_ref().unwrap();
+        quote! {
+            use #path as Instruction;
         }
     };
 
