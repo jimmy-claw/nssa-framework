@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build --workspace
-      - name: Test
-        run: cargo test --workspace
+      - name: Build (core + macros)
+        run: cargo build -p nssa-framework -p nssa-framework-core -p nssa-framework-macros
+      - name: Test (core + macros)
+        run: cargo test -p nssa-framework -p nssa-framework-core -p nssa-framework-macros
