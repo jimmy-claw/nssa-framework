@@ -470,6 +470,10 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                     ));
             };
 
+            // Check if this instruction has any validation (signer/init checks)
+            let has_validation = ix.accounts.iter().any(|a| a.constraints.signer || a.constraints.init);
+            let validate_fn_name = format_ident!("__validate_{}", ix.fn_name);
+
             let call_args: Vec<TokenStream2> = ix
                 .accounts
                 .iter()
@@ -483,9 +487,26 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                 }))
                 .collect();
 
+            let validation_call = if has_validation {
+                let account_refs: Vec<TokenStream2> = ix
+                    .accounts
+                    .iter()
+                    .map(|a| {
+                        let name = &a.name;
+                        quote! { #name }
+                    })
+                    .collect();
+                quote! {
+                    #mod_name::#validate_fn_name(&[#(#account_refs.clone()),*])?;
+                }
+            } else {
+                quote! {}
+            };
+
             quote! {
                 #pattern => {
                     #account_destructure
+                    #validation_call
                     #mod_name::#fn_name(#(#call_args),*)
                         .map(|output| (output.post_states, output.chained_calls))
                 }
@@ -510,8 +531,64 @@ fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
         .collect()
 }
 
-fn generate_validation(_instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
-    vec![]
+fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
+    instructions
+        .iter()
+        .map(|ix| {
+            let fn_name = format_ident!("__validate_{}", ix.fn_name);
+            
+            // Generate signer checks for accounts with #[account(signer)]
+            let signer_checks: Vec<TokenStream2> = ix
+                .accounts
+                .iter()
+                .enumerate()
+                .filter(|(_, acc)| acc.constraints.signer)
+                .map(|(i, acc)| {
+                    let acc_name = acc.name.to_string();
+                    let idx = i;
+                    quote! {
+                        if !accounts[#idx].is_authorized {
+                            return Err(nssa_framework_core::error::NssaError::Unauthorized {
+                                message: format!("Account '{}' (index {}) must be a signer", #acc_name, #idx),
+                            });
+                        }
+                    }
+                })
+                .collect();
+            
+            // Generate init checks for accounts with #[account(init)]
+            let init_checks: Vec<TokenStream2> = ix
+                .accounts
+                .iter()
+                .enumerate()
+                .filter(|(_, acc)| acc.constraints.init)
+                .map(|(i, acc)| {
+                    let acc_name = acc.name.to_string();
+                    let idx = i;
+                    quote! {
+                        if accounts[#idx].account != nssa_core::account::Account::default() {
+                            return Err(nssa_framework_core::error::NssaError::AccountAlreadyInitialized {
+                                account_index: #idx,
+                            });
+                        }
+                    }
+                })
+                .collect();
+
+            if signer_checks.is_empty() && init_checks.is_empty() {
+                return quote! {};
+            }
+
+            quote! {
+                #[allow(dead_code)]
+                fn #fn_name(accounts: &[nssa_core::account::AccountWithMetadata]) -> Result<(), nssa_framework_core::error::NssaError> {
+                    #(#signer_checks)*
+                    #(#init_checks)*
+                    Ok(())
+                }
+            }
+        })
+        .collect()
 }
 
 fn to_pascal_case(ident: &Ident) -> Ident {
