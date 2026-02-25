@@ -7,7 +7,7 @@ description = "Developer framework for building LEZ programs (like Anchor for So
 [dependencies]
 lez-framework-core = { path = "../lez-framework-core" }
 lez-framework-macros = { path = "../lez-framework-macros" }
-nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "dee3f7fa6f2bf63abef00828f246ddacade9cdaf", features = ["host"] }
+nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "767b5afd388c7981bcdf6f5b5c80159607e07e5b", features = ["host"] }
 borsh = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
