@@ -10,9 +10,9 @@ path = "src/bin/main.rs"
 
 [dependencies]
 lez-framework-core = { path = "../lez-framework-core" }
-nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", branch = "main" }
-nssa = { git = "https://github.com/logos-blockchain/lssa.git", branch = "main" }
-wallet = { git = "https://github.com/logos-blockchain/lssa.git", branch = "main" }
+nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "dee3f7fa6f2bf63abef00828f246ddacade9cdaf" }
+nssa = { git = "https://github.com/logos-blockchain/lssa.git", rev = "dee3f7fa6f2bf63abef00828f246ddacade9cdaf" }
+wallet = { git = "https://github.com/logos-blockchain/lssa.git", rev = "dee3f7fa6f2bf63abef00828f246ddacade9cdaf" }
 risc0-zkvm = { version = "3.0.3", features = ["std"] }
 base58 = "0.2"
 serde = { version = "1.0", features = ["derive"] }
