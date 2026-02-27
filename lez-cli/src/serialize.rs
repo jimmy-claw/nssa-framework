@@ -91,6 +91,23 @@ fn serialize_array_risc0(out: &mut Vec<u32>, elem_type: &IdlType, _size: usize, 
 
 fn serialize_vec_risc0(out: &mut Vec<u32>, elem_type: &IdlType, val: &ParsedValue) {
     match (elem_type, val) {
+        // Vec<u32> — comma-separated decimal values
+        (IdlType::Primitive(p), ParsedValue::U32Array(vals)) if p == "u32" => {
+            out.push(vals.len() as u32);
+            for v in vals {
+                out.push(*v);
+            }
+        }
+        // Vec<u32> — passed as Raw CSV string (e.g. "0,200,0,0,0")
+        (IdlType::Primitive(p), ParsedValue::Raw(s)) if p == "u32" => {
+            let vals: Vec<u32> = s.split(',')
+                .filter_map(|x| x.trim().parse::<u32>().ok())
+                .collect();
+            out.push(vals.len() as u32);
+            for v in vals {
+                out.push(v);
+            }
+        }
         (IdlType::Array { array }, ParsedValue::ByteArrayVec(vecs)) => {
             out.push(vecs.len() as u32);
             match &*array.0 {
