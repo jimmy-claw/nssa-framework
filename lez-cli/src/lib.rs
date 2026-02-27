@@ -222,21 +222,37 @@ fn compute_pda_command(idl: &LezIdl, program_path: &str, args: &[String]) {
         }
     }
 
-    // Load program to get program_id
-    let program_bytes = match std::fs::read(program_path) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("❌ Cannot read program binary '{}': {}", program_path, e);
-            eprintln!("   Hint: pass --program <path-to-binary>");
-            std::process::exit(1);
-        }
-    };
+    // Get program_id: from --program-id hex arg, or by loading the binary
     use nssa::program::Program;
-    let program = Program::new(program_bytes).unwrap_or_else(|e| {
-        eprintln!("❌ Invalid program binary: {:?}", e);
+    use crate::hex::decode_bytes_32;
+
+    let program_id: nssa_core::program::ProgramId = if let Some(ParsedValue::Str(hex)) = seed_args.remove("program_id") {
+        // --program-id passed as seed arg (parsed above) — use it directly
+        let bytes = decode_bytes_32(&hex).unwrap_or_else(|e| {
+            eprintln!("❌ Invalid --program-id '{}': {}", hex, e);
+            std::process::exit(1);
+        });
+        // Convert [u8;32] to [u32;8]
+        let mut pid = [0u32; 8];
+        for (i, chunk) in bytes.chunks(4).enumerate() {
+            pid[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+        pid
+    } else if !program_path.is_empty() && std::path::Path::new(program_path).exists() {
+        let program_bytes = std::fs::read(program_path).unwrap_or_else(|e| {
+            eprintln!("❌ Cannot read program binary '{}': {}", program_path, e);
+            std::process::exit(1);
+        });
+        Program::new(program_bytes).unwrap_or_else(|e| {
+            eprintln!("❌ Invalid program binary: {:?}", e);
+            std::process::exit(1);
+        }).id()
+    } else {
+        eprintln!("❌ Program ID required to compute PDA.");
+        eprintln!("   Pass --program-id <64-char-hex>  (preferred)");
+        eprintln!("   Or  --program <path-to-binary>");
         std::process::exit(1);
-    });
-    let program_id = program.id();
+    };
 
     // Compute PDA
     match compute_pda_from_seeds(&pda_def.seeds, &program_id, &HashMap::new(), &seed_args) {
