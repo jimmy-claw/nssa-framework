@@ -24,8 +24,7 @@ use inspect::inspect_binaries;
 use tx::execute_instruction;
 use pda::compute_pda_from_seeds;
 use lez_framework_core::idl::{LezIdl, IdlSeed};
-use parse::{parse_value, ParsedValue};
-use nssa::AccountId;
+use parse::ParsedValue;
 use std::collections::HashMap;
 use std::{env, fs, process};
 
