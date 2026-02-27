@@ -54,6 +54,7 @@ pub async fn execute_instruction(
         }
     }
     for acc in &ix.accounts {
+        // rest accounts are variadic (0 or more) — never required
         if acc.pda.is_none() && !acc.rest {
             let key = format!("{}-account", snake_to_kebab(&acc.name));
             if !args.contains_key(&key) {
@@ -80,14 +81,35 @@ pub async fn execute_instruction(
 
     // Parse non-PDA account IDs
     let mut parsed_accounts: Vec<(&str, Vec<u8>)> = Vec::new();
+    // rest accounts are variadic: each expands to 0 or more AccountIds
+    let mut rest_accounts: Vec<(&str, Vec<Vec<u8>>)> = Vec::new();
     for acc in &ix.accounts {
         if acc.pda.is_some() { continue; }
         if acc.rest { let key = format!("{}-account", snake_to_kebab(&acc.name)); if !args.contains_key(&key) { continue; } }
         let key = format!("{}-account", snake_to_kebab(&acc.name));
-        let raw = args.get(&key).unwrap();
-        match decode_bytes_32(raw) {
-            Ok(bytes) => parsed_accounts.push((&acc.name, bytes.to_vec())),
-            Err(e) => { eprintln!("❌ --{}: {}", key, e); has_errors = true; }
+        if acc.rest {
+            // variadic: optional, comma-separated list of account IDs (0 entries is valid)
+            let entries: Vec<Vec<u8>> = if let Some(raw) = args.get(&key) {
+                raw.split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        match decode_bytes_32(s) {
+                            Ok(bytes) => bytes.to_vec(),
+                            Err(e) => { eprintln!("❌ --{}: {}", key, e); has_errors = true; vec![] }
+                        }
+                    })
+                    .collect()
+            } else {
+                vec![] // rest accounts are optional — 0 is valid
+            };
+            rest_accounts.push((&acc.name, entries));
+        } else {
+            let raw = args.get(&key).unwrap();
+            match decode_bytes_32(raw) {
+                Ok(bytes) => parsed_accounts.push((&acc.name, bytes.to_vec())),
+                Err(e) => { eprintln!("❌ --{}: {}", key, e); has_errors = true; }
+            }
         }
     }
     if has_errors { process::exit(1); }
@@ -102,12 +124,19 @@ pub async fn execute_instruction(
     for acc in &ix.accounts {
         if acc.pda.is_some() {
             println!("  📦 {} → auto-computed (PDA)", acc.name);
-        } else if let Some(account_bytes) = parsed_accounts.iter().find(|(n, _)| *n == acc.name) {
-            println!("  📦 {} → 0x{}", acc.name, hex_encode(&account_bytes.1));
         } else if acc.rest {
-            println!("  📦 {} → (none provided, rest account)", acc.name);
+            if let Some((_, entries)) = rest_accounts.iter().find(|(n, _)| *n == acc.name) {
+                if entries.is_empty() {
+                    println!("  📦 {} → (none — variadic rest)", acc.name);
+                } else {
+                    for e in entries {
+                        println!("  📦 {} → 0x{}", acc.name, hex_encode(e));
+                    }
+                }
+            }
         } else {
-            println!("  📦 {} → ⚠️ MISSING", acc.name);
+            let account_bytes = parsed_accounts.iter().find(|(n, _)| *n == acc.name).unwrap();
+            println!("  📦 {} → 0x{}", acc.name, hex_encode(&account_bytes.1));
         }
     }
     println!();
@@ -174,6 +203,14 @@ pub async fn execute_instruction(
         arr.copy_from_slice(bytes);
         account_map.insert(name.to_string(), AccountId::new(arr));
     }
+    // Note: rest accounts are variadic; store first entry (if any) for PDA seed resolution
+    for (name, entries) in &rest_accounts {
+        if let Some(first) = entries.first() {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(first);
+            account_map.insert(name.to_string(), AccountId::new(arr));
+        }
+    }
 
     // Resolve external account references needed by PDA seeds
     for acc in &ix.accounts {
@@ -223,15 +260,22 @@ pub async fn execute_instruction(
 
     let mut account_ids: Vec<AccountId> = Vec::new();
     for acc in &ix.accounts {
-        if acc.rest && !account_map.contains_key(&acc.name) {
-            // rest account with 0 entries — skip
-            continue;
+        if acc.rest {
+            // expand variadic rest accounts in order (may be 0 or more)
+            if let Some((_, entries)) = rest_accounts.iter().find(|(n, _)| *n == acc.name) {
+                for bytes in entries {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(bytes);
+                    account_ids.push(AccountId::new(arr));
+                }
+            }
+        } else {
+            let id = account_map.get(&acc.name).unwrap_or_else(|| {
+                eprintln!("❌ Account '{}' not resolved", acc.name);
+                process::exit(1);
+            });
+            account_ids.push(*id);
         }
-        let id = account_map.get(&acc.name).unwrap_or_else(|| {
-            eprintln!("❌ Account '{}' not resolved", acc.name);
-            process::exit(1);
-        });
-        account_ids.push(*id);
     }
 
     let wallet_core = WalletCore::from_env().unwrap_or_else(|e| {
