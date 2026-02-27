@@ -98,6 +98,13 @@ fn serialize_vec_risc0(out: &mut Vec<u32>, elem_type: &IdlType, val: &ParsedValu
                 out.push(*v);
             }
         }
+        // Vec<u8> — byte array (already parsed)
+        (IdlType::Primitive(p), ParsedValue::ByteArray(bytes)) if p == "u8" => {
+            out.push(bytes.len() as u32);
+            for b in bytes {
+                out.push(*b as u32);
+            }
+        }
         // Vec<u32> — passed as Raw CSV string (e.g. "0,200,0,0,0")
         (IdlType::Primitive(p), ParsedValue::Raw(s)) if p == "u32" => {
             let vals: Vec<u32> = s.split(',')

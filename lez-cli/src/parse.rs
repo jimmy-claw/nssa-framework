@@ -184,6 +184,26 @@ fn parse_vec(raw: &str, elem_type: &IdlType) -> Result<ParsedValue, String> {
             }
             _ => Ok(ParsedValue::Raw(raw.to_string())),
         },
+        // Vec<u8> — comma-separated decimal values
+        IdlType::Primitive(p) if p == "u8" => {
+            let bytes: Result<Vec<u8>, _> = raw.split(',')
+                .map(|s| s.trim().parse::<u8>())
+                .collect();
+            match bytes {
+                Ok(b) => Ok(ParsedValue::ByteArray(b)),
+                Err(_) => Ok(ParsedValue::Raw(raw.to_string())),
+            }
+        }
+        // Vec<u32> — comma-separated decimal values
+        IdlType::Primitive(p) if p == "u32" => {
+            let vals: Result<Vec<u32>, _> = raw.split(',')
+                .map(|s| s.trim().parse::<u32>())
+                .collect();
+            match vals {
+                Ok(v) => Ok(ParsedValue::U32Array(v)),
+                Err(_) => Ok(ParsedValue::Raw(raw.to_string())),
+            }
+        }
         _ => Ok(ParsedValue::Raw(raw.to_string())),
     }
 }
