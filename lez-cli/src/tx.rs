@@ -52,7 +52,7 @@ pub async fn execute_instruction(
         }
     }
     for acc in &ix.accounts {
-        if acc.pda.is_none() {
+        if acc.pda.is_none() && !acc.rest {
             let key = format!("{}-account", snake_to_kebab(&acc.name));
             if !args.contains_key(&key) {
                 missing.push(format!("--{}", key));
