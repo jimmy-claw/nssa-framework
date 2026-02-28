@@ -318,10 +318,10 @@ fn compute_pda_raw(args: &[String]) {
         eprintln!("❌ Invalid --program-id '{}': {}", pid_hex, e);
         std::process::exit(1);
     });
+    let program_id_slice: &[u32] = bytemuck::try_cast_slice(&pid_bytes)
+        .expect("ProgramId bytes should be castable to &[u32]");
     let mut program_id: ProgramId = [0u32; 8];
-    for (i, chunk) in pid_bytes.chunks(4).enumerate() {
-        program_id[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-    }
+    program_id.copy_from_slice(program_id_slice);
 
     // Collect seed args (everything that's not --program-id or its value)
     let mut seeds: Vec<[u8; 32]> = Vec::new();
